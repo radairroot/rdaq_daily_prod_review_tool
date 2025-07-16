@@ -2,16 +2,60 @@ import pandas as pd
 from sqlalchemy import create_engine
 import os
 from dotenv import load_dotenv
+from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError, OperationalError
+import streamlit as st
 
 # 2025-May-13: updated the daily diff SQL since call and sms were added.
 
 load_dotenv()
 
-# [1] Setup function to pull filtered EOM (End of Market) data
-def eom_query(csid):
+def get_rsr_conn():
+    host_str = os.getenv("RSR_CONN")
+    engine = create_engine(host_str)
+    return engine
+
+# Correctly call the PostgreSQL function and fetch the result
+def get_comp_csid(csid): # Renamed function to clarify its purpose: getting comp_csid
+    comp_csid = None
+    try:
+        with get_rsr_conn().connect() as connection:
+            query = text("SELECT analytic.fn_get_previous_csid(:csid)")
+            result = connection.execute(query, {'csid': csid}).scalar_one_or_none()
+            if result is not None:
+                comp_csid = result
+            else:
+                st.warning("The database function 'fn_get_previous_csid' returned no result for the given csid. Please enter manually.")
+    except (ProgrammingError, OperationalError) as e:
+        st.error(f"Database query error when fetching comp_csid: {e}")
+    except Exception as e:
+        st.error(f"An unexpected error occurred while fetching comp_csid: {e}")
+
+    if comp_csid is None:
+        comp_csid = st.number_input(
+            "Could not determine 'comp_csid' from the database. Please enter the comparison CSID manually:",
+            min_value=1, step=1, format="%d", value=12709 # Added a default value for manual input
+        )
+        st.info(f"Using manually entered comp_csid: {comp_csid}")
+        
+    st.write(f"csid: {csid}, comp_csid: {comp_csid}") # This line is for debugging, can be removed
+
+    return comp_csid # This function now returns the comp_csid
+
+def market_comp_query(csid, comp_csid):
+    # This function should return the SQL query for market comparison
+    # Assuming there's a dq.fn_market_comp or similar function
+    return f"""SELECT * FROM dq.fn_eom_pl_comp_b({csid},{comp_csid})"""
+
+def get_market_comp(csid, comp_csid):
+    # This function now takes comp_csid as an argument
+    df = pd.read_sql(market_comp_query(csid, comp_csid), con=get_rsr_conn())
+    return df
+
+def eom_query(csid,comp_csid):
     return f"""
         with eom_plus as (
-SELECT * FROM dq.fn_eom_plus({csid})
+SELECT * FROM dq.fn_eom_pl_comp_b({csid},{comp_csid})
 )
 SELECT *
 from eom_plus
@@ -23,39 +67,36 @@ WHERE (metric IN ('m2m_block','m2m_drop')and delta > 2)             -- FILTER fo
 UNION
 SELECT *
 from eom_plus
-WHERE (rank NOT IN ('12v','13v','14v','16v','05d','08u','01m','02m') and delta < -2)      -- FILTER for acc/task 1 or 2?? / removed 15v
+WHERE (rank NOT IN ('12v','13v','14v','16v','05d','08u','01m','02m') and delta < -2)      -- FILTER for acc/task 1 or 2??
 UNION
 SELECT *
 from eom_plus
-WHERE (rank IN ('12v','13v','14v') and delta > 2)      -- FILTER for video
+WHERE (rank IN ('12v','13v','14v','16v') and delta > 2)      -- FILTER for video  updates 4/22
 UNION
 SELECT *
-from eom_plus
-WHERE (rank IN ('16v') and delta > 10)      -- video stall severity increased threshold
-ORDER BY rank
+FROM eom_plus
+WHERE (rank IN ('16v') AND delta > 20)
+UNION
+SELECT DISTINCT NULL AS rank, csid,comp, name, NULL as carrier, 
+NULL AS metric, NULL::numeric as current_rate,NULL::numeric as past_rate,
+NULL::numeric AS delta, NULL::numeric AS pct_change, type::smallint
+FROM eom_plus
+WHERE csid = {csid}
+ORDER BY rank;
         """
-    
-
-def get_rsr_conn():
-    host_str = os.getenv("RSR_CONN")
-    engine = create_engine(host_str)
-    return engine
 
 # execute query to pull eom
-def get_eom(csid):
-    df = pd.read_sql(eom_query(csid), con=get_rsr_conn())
-
+def get_eom(csid,comp_csid):
+    df = pd.read_sql(eom_query(csid,comp_csid), con=get_rsr_conn())
     return df
 
-# [2] Setup function to pull full EOM data
-def eom_full_query(csid):
-    return f"""SELECT * FROM dq.fn_eom_plus({csid})"""
+def eom_full_query(csid,comp_csid):
+    return f"""SELECT * FROM dq.fn_eom_pl_comp_b({csid},{comp_csid})"""
 
 # execute query to pull full eom table
-def get_eom_full(csid):
-    df = pd.read_sql(eom_full_query(csid), con=get_rsr_conn())
+def get_eom_full(csid,comp_csid):
+    df = pd.read_sql(eom_full_query(csid,comp_csid), con=get_rsr_conn())
     return df
-
 
 
 #Begin Call and network pull
@@ -181,7 +222,11 @@ SELECT *
     UNION
     SELECT *
     from diff_day
-    WHERE (test_type_id IN (19,20,26,23) AND tsk_dif_ab > 5 AND n_grp > 19) OR (test_type_id IN (19,20,26,23)  AND acc_dif_ab > 5 AND n_grp > 19)
+    WHERE (test_type_id IN (19,20,26) AND tsk_dif_ab > 3 AND n_grp > 19) OR (test_type_id IN (19,20,26)  AND acc_dif_ab > 5 AND n_grp > 19)
+    UNION
+    SELECT *
+    from diff_day
+    WHERE (test_type_id = 23 AND tsk_dif_ab > 1 AND n_grp > 19) OR (test_type_id =23  AND acc_dif_ab > 1 AND n_grp > 19)
 	UNION
 	SELECT *
     from diff_day
@@ -195,6 +240,18 @@ def get_datadiff(csid):
 
     return df
 
+
+def auto_check(csid):
+    return f"SELECT * FROM dq.fn_auto_check({csid});"
+
+
+
+
+# execute query for dq check info
+def get_auto_check(csid):
+    df = pd.read_sql(auto_check(csid), con=get_rsr_conn())
+
+    return df
 
 # BEGIN pull for dq check info 
 
@@ -210,17 +267,19 @@ def get_dqcheck(csid):
 
     return df
 
+
+
 # Pull Sort of MAD data
-def dq_sort_of_mad(csid):
-    return f"SELECT * FROM dq.fn_sort_of_mad({csid}) UNION SELECT * FROM dq.fn_sort_of_mad((SELECT fn_get_previous_csid FROM analytic.fn_get_previous_csid({csid})));"
+def dq_sort_of_mad(csid,comp_csid):
+    return f"SELECT * FROM dq.fn_sort_of_mad({csid}) UNION SELECT * FROM dq.fn_sort_of_mad(({comp_csid}));"
 
 
 # Pull Sort of MAD data
 #def dq_sort_of_mad(csid):
 #	return f"SELECT * FROM dq.fn_sort_of_mad((SELECT fn_get_previous_csid FROM analytic.fn_get_previous_csid({csid})));"
 
-def get_MADish(csid):
-    df = pd.read_sql(dq_sort_of_mad(csid), con=get_rsr_conn())
+def get_MADish(csid,comp_csid):
+    df = pd.read_sql(dq_sort_of_mad(csid,comp_csid), con=get_rsr_conn())
 
     return df
 
@@ -315,5 +374,32 @@ FROM (
 # execute query to pull blocklisting rate from postgres
 def get_bl_test(csid):
     df = pd.read_sql(dq_bl_test(csid), con=get_rsr_conn())
+
+    return df
+
+# NR percentage by device
+def get_dl_nr_device(csid):
+    return f"""
+            with base AS (
+			SELECT product_period, friendly_name,device_id, best_network_type
+			FROM dq.fn_dq_tool({csid}) WHERE test_type_id =20 AND period_name IS NOT NULL AND blocklisted IS FALSE AND flag_valid IS TRUE
+),
+data_net_cat AS (
+    		select product_period, friendly_name,device_id,
+    		case when best_network_type in ('NR SA') then 'NR-5G' 
+    		when best_network_type in ('NR NSA, LTE') then 'Mixed-NR_5G' 
+    		else 'Non-NR' end as sa_status
+			FROM base
+)
+select product_period, friendly_name,device_id, sa_status, count(*) as dl_count, 
+round(100 * count(*) / sum(count(*)) over (partition by friendly_name),2) as dl_pct
+from data_net_cat
+group by product_period, friendly_name, device_id,sa_status
+order by friendly_name, case when sa_status = 'NR-5G' then 1 when sa_status = 'Mixed-NR_5G' 
+then 2 when sa_status = 'Non-NR' then 3 end
+"""
+
+def dl_nr_percentages(csid):
+    df = pd.read_sql(get_dl_nr_device(csid), con=get_rsr_conn())
 
     return df

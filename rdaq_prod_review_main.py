@@ -28,9 +28,11 @@ load_dotenv()
 
 # credentials and string for db connection
 def get_rsr_conn():
-	host_str = os.getenv("RSR_CONN")
-	engine = create_engine(host_str)
-	return engine
+    host_str = os.getenv("RSR_CONN")
+    if not host_str:
+        raise ValueError("RSR_CONN environment variable is not set or is empty. Please check your .env file or environment variables.")
+    engine = create_engine(host_str)
+    return engine
 
 st.set_page_config(page_title='Market Review Tool',
    page_icon='🧷',
@@ -43,16 +45,71 @@ st.title("Production Market Daily Review 🛸")
 with st.form("my_form"):
     csid = st.number_input("Enter CSID [All Tabs]:", min_value=1, max_value=10000000, value=12610)
     submitted = st.form_submit_button("Submit")
-        
-if submitted:
-    df_eom = heavy_lifts.get_eom(csid)
+    # Use Streamlit's session state to track the last submitted CSID and rerun if changed
+    if 'last_csid' not in st.session_state:
+        st.session_state['last_csid'] = csid
+
+    if submitted:
+        if st.session_state['last_csid'] != csid:
+            st.session_state['last_csid'] = csid
+            # Retrieve comp_csid here when CSID changes
+            comp_csid = heavy_lifts.get_comp_csid(csid)
+            st.session_state['comp_csid'] = comp_csid
+            #st.experimental_rerun()
+        else: # If CSID didn't change but submit was pressed again, re-calculate comp_csid to handle manual entry
+            comp_csid = heavy_lifts.get_comp_csid(csid)
+            st.session_state['comp_csid'] = comp_csid
+
+
+# Use the CSID from session state for all data loading/output
+current_csid = st.session_state.get('last_csid', csid)
+current_comp_csid = st.session_state.get('comp_csid') # Retrieve comp_csid from session state
+
+# Ensure comp_csid is determined before proceeding with data loading
+if current_comp_csid is None:
+    current_comp_csid = heavy_lifts.get_comp_csid(current_csid)
+    st.session_state['comp_csid'] = current_comp_csid
+
+
+if current_csid is not None and current_comp_csid is not None:
+    df_market_comp = heavy_lifts.get_market_comp(current_csid, current_comp_csid)
+    st.write("Check comparison market")
+    st.write(df_market_comp)
+
+    df_eom = heavy_lifts.get_eom(current_csid, current_comp_csid)
     st.write("Flagged Market level comparisons [Market checkpoint 1a]")
     st.write(df_eom)
 
+    #df_eom_full = heavy_lifts.get_eom_full(current_csid, current_comp_csid)
+    #st.write("Full Market level comparisons")
+    #st.write(df_eom_full)
+
 if submitted:
-    df_eom_full = heavy_lifts.get_eom_full(csid)
-    st.write("Full Market level comparisons")
-    st.write(df_eom_full)
+    st.write("Stand-alone 5G *NR* percentages by device")
+    color_map = {
+  '5G' : '#009697', 
+  'Mixed-5G' : '#3CB371', 
+  'LTE' : '#58595b',
+  'Non-LTE' : '#f4a460'
+    }
+
+    curr_nr = heavy_lifts.dl_nr_percentages(csid)
+    comp_nr = heavy_lifts.dl_nr_percentages(csid) # This should ideally use comp_csid if you want comparison data
+
+    concat_nr = pd.concat([curr_nr,comp_nr], ignore_index=True)
+    #print("Concatenated Rows:\n", concat_nr)
+
+    fig = px.bar(concat_nr, x="product_period", y="dl_pct", color="sa_status", barmode="relative",facet_col="friendly_name",
+             color_discrete_map=color_map) # text_auto=True
+
+    fig.update_xaxes(tickangle=45)
+    for annotation in fig.layout.annotations:
+        if 'friendly_name=' in annotation.text:
+            annotation.text = annotation.text.replace('friendly_name=', '')
+            annotation.font = dict(size=9)
+            annotation.textangle = -45 
+
+    st.plotly_chart(fig, use_container_width=True)    
 
     
 # Turn off call net comparison for now...
@@ -60,6 +117,8 @@ if submitted:
 #    df_callnet = heavy_lifts.get_callnet(csid)
 #    st.write("Call Net - NOT filtered")
 #    st.write(df_callnet)
+
+
 
 if submitted:
     df_market_net = heavy_lifts.get_marketnet(csid)
@@ -72,14 +131,14 @@ if submitted:
     st.write(df_datadiff) 
  
 if submitted:
-    get_madish = heavy_lifts.get_MADish(csid)
+    get_madish = heavy_lifts.get_MADish(csid,comp_csid)
     st.write("MAD-type tables plots [Market checkpoint 1c]")
     #st.write(get_madish)               #commented out for now
 
 # Begin code for plotting MAD-type data
     if submitted and get_madish is not None:
         # Create new column for collection set grouping
-        get_madish['period'] = get_madish['collection_set'].apply(lambda x: '2024-2H' if x.endswith('2024-2H') else '2025-1H' if x.endswith('2025-1H') else 'Other')
+        get_madish['period'] = get_madish['collection_set'].apply(lambda x: '2025-1H' if x.endswith('2025-1H') else '2025-2H' if x.endswith('2025-2H') else 'Other')
         
         # Create subplots using fixed 'acc' metric
         fig = px.scatter(get_madish, 
@@ -131,8 +190,8 @@ if submitted:
 
         # Define marker properties for each period
         marker_props = {
-            '2025-1H': dict(symbol='circle', size=12),
-            '2024-2H': dict(symbol='triangle-up', size=8)
+            '2025-2H': dict(symbol='circle', size=12),
+            '2025-1H': dict(symbol='triangle-up', size=8)
         }
 
         # Add traces for each subplot
@@ -194,6 +253,11 @@ if submitted:
     st.write(df_layer3_reveiw)
 
 if submitted:
+    df_auto_check = heavy_lifts.get_auto_check(csid)
+    st.write("DQ auto check [Market checkpoint 4b]")
+    st.write(df_auto_check)
+
+if submitted:
     df_dqcheck = heavy_lifts.get_dqcheck(csid)
     st.write("DQ check items [Market checkpoint 4]")
     st.write(df_dqcheck)
@@ -207,6 +271,3 @@ if submitted:
     df_bl = heavy_lifts.get_excluded(csid)
     st.write("Data Exclusion Review")
     st.write(df_bl)
-
-
-
