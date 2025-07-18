@@ -8,6 +8,7 @@ import streamlit as st
 
 # 2025-May-13: updated the daily diff SQL since call and sms were added.
 
+
 load_dotenv()
 
 def get_rsr_conn():
@@ -337,6 +338,17 @@ def get_algo(csid):
     return df
 
 
+#setup function to pull filtered agorithm data
+def dq_filtered_algo(csid):
+    return f"SELECT * FROM dq.fn_natl_filter_algo({csid});"
+
+
+#2. execute query to pull filtered algo data from postgres
+def get_filtered_algo(csid):
+    df = pd.read_sql(dq_filtered_algo(csid), con=get_rsr_conn())
+    return df
+
+
 #setup function to pull layer3 review table
 def dq_layer3_m2m(csid):
     return f"SELECT * FROM dq.fn_m2m_fail_layer3_py({csid});" # WHERE report_set <> 'Dish';"  -- 2025-2H: include Dish in the results
@@ -381,21 +393,21 @@ def get_bl_test(csid):
 def get_dl_nr_device(csid):
     return f"""
             with base AS (
-			SELECT product_period, friendly_name,device_id, best_network_type
+			SELECT product_period, concat_ws ('-',friendly_name::text,device_id::text) as device_f_name, best_network_type
 			FROM dq.fn_dq_tool({csid}) WHERE test_type_id =20 AND period_name IS NOT NULL AND blocklisted IS FALSE AND flag_valid IS TRUE
 ),
 data_net_cat AS (
-    		select product_period, friendly_name,device_id,
+    		select product_period, device_f_name,
     		case when best_network_type in ('NR SA') then 'NR-5G' 
     		when best_network_type in ('NR NSA, LTE') then 'Mixed-NR_5G' 
     		else 'Non-NR' end as sa_status
 			FROM base
 )
-select product_period, friendly_name,device_id, sa_status, count(*) as dl_count, 
-round(100 * count(*) / sum(count(*)) over (partition by friendly_name),2) as dl_pct
+select product_period, device_f_name, sa_status, count(*) as dl_count, 
+round(100 * count(*) / sum(count(*)) over (partition by device_f_name),2) as dl_pct
 from data_net_cat
-group by product_period, friendly_name, device_id,sa_status
-order by friendly_name, case when sa_status = 'NR-5G' then 1 when sa_status = 'Mixed-NR_5G' 
+group by product_period, device_f_name,sa_status
+order by device_f_name, case when sa_status = 'NR-5G' then 1 when sa_status = 'Mixed-NR_5G' 
 then 2 when sa_status = 'Non-NR' then 3 end
 """
 

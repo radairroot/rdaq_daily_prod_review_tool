@@ -9,6 +9,11 @@
 
 # renamed to rdaq_prod_review.py prior to checking into git.  (totally_basic_ver2.py is the original name)
 
+# 2025-July 17: 
+#           1. Updated the NR % Bar chart to use a combination of friendly_name and device_id (for VZ PS markets with multiple pairs of devices)
+#           2. Added a filtered alogorithm pull to test along with the original algorithm version. 
+#                      This verison should remove most of the consecutive failures that are valid and due to rural areas in nationals.
+
 import pandas as pd
 import os
 from sqlalchemy import create_engine
@@ -99,13 +104,13 @@ if submitted:
     concat_nr = pd.concat([curr_nr,comp_nr], ignore_index=True)
     #print("Concatenated Rows:\n", concat_nr)
 
-    fig = px.bar(concat_nr, x="product_period", y="dl_pct", color="sa_status", barmode="relative",facet_col="friendly_name",
+    fig = px.bar(concat_nr, x="product_period", y="dl_pct", color="sa_status", barmode="relative",facet_col="device_f_name",
              color_discrete_map=color_map) # text_auto=True
 
     fig.update_xaxes(tickangle=45)
     for annotation in fig.layout.annotations:
-        if 'friendly_name=' in annotation.text:
-            annotation.text = annotation.text.replace('friendly_name=', '')
+        if 'device_f_name=' in annotation.text:
+            annotation.text = annotation.text.replace('device_f_name=', '')
             annotation.font = dict(size=9)
             annotation.textangle = -45 
 
@@ -246,6 +251,11 @@ if submitted:
     df_dev_algo = heavy_lifts.get_algo(csid)
     st.write("Device algorithm: 4+ consecutive failures [Market checkpoint 2]")
     st.write(df_dev_algo)
+
+if submitted:
+    df_filtered_algo = heavy_lifts.get_filtered_algo(csid)
+    st.write("Filtered Device algorithm :  4+ consecutive failures only one device")
+    st.write(df_filtered_algo)
 
 if submitted:
     df_layer3_reveiw = heavy_lifts.get_layer3_m2m(csid)
